@@ -704,7 +704,7 @@ window.submitModal = async function() {
 
   const submitBtn = document.getElementById('btnSubmitAlert');
   submitBtn.disabled = true;
-  submitBtn.textContent = 'Activating alerts...';
+  submitBtn.textContent = 'Redirecting to Stripe...';
 
   try {
     const res = await fetch('/api/alerts', {
@@ -716,8 +716,15 @@ window.submitModal = async function() {
     });
     
     if (res.ok) {
-      document.getElementById('mBody').style.display = 'none';
-      document.getElementById('mSuccess').style.display = 'block';
+      const data = await res.json();
+      if (data.stripeUrl) {
+        // Redirect directly to the secure Stripe-hosted checkout page!
+        window.location.href = data.stripeUrl;
+      } else {
+        // Fallback gracefully to standard success screen if Stripe keys aren't set yet
+        document.getElementById('mBody').style.display = 'none';
+        document.getElementById('mSuccess').style.display = 'block';
+      }
     } else {
       alert('Failed to register alerts. Please try again.');
     }
@@ -726,7 +733,7 @@ window.submitModal = async function() {
     alert('Failed to contact alert queue server. Please check connection.');
   } finally {
     submitBtn.disabled = false;
-    submitBtn.textContent = 'Activate Free Alerts';
+    submitBtn.textContent = 'Pay AED 10 & Activate Alerts';
   }
 };
 
@@ -735,4 +742,55 @@ document.addEventListener('DOMContentLoaded', () => {
   fetchSlots(true);
   renderCentres();
   renderFaqs();
+
+  // Handle Stripe Payment Redirect Query Statuses
+  const urlParams = new URLSearchParams(window.location.search);
+  const status = urlParams.get('status');
+  if (status) {
+    // Clear URL parameters immediately so they don't linger on page refresh
+    window.history.replaceState({}, document.title, window.location.pathname);
+    
+    // Create modern animated floating toast banner
+    const toast = document.createElement('div');
+    toast.style.position = 'fixed';
+    toast.style.bottom = '24px';
+    toast.style.right = '24px';
+    toast.style.zIndex = '99999';
+    toast.style.background = status === 'success' ? '#065f46' : '#991b1b';
+    toast.style.color = '#ffffff';
+    toast.style.padding = '16px 24px';
+    toast.style.borderRadius = '12px';
+    toast.style.boxShadow = '0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1)';
+    toast.style.display = 'flex';
+    toast.style.alignItems = 'center';
+    toast.style.gap = '12px';
+    toast.style.fontSize = '14px';
+    toast.style.fontWeight = '600';
+    toast.style.animation = 'slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards';
+    toast.style.border = '1px solid rgba(255,255,255,0.1)';
+    
+    const style = document.createElement('style');
+    style.textContent = `
+      @keyframes slideUp {
+        from { transform: translateY(40px); opacity: 0; }
+        to { transform: translateY(0); opacity: 1; }
+      }
+    `;
+    document.head.appendChild(style);
+
+    if (status === 'success') {
+      toast.innerHTML = `<span>🎉</span> <span>Subscription active! Your premium Schengen live slot alerts are now fully activated.</span>`;
+    } else if (status === 'cancel') {
+      toast.innerHTML = `<span>⚠️</span> <span>Alert activation was canceled. Complete payment to activate premium alerts.</span>`;
+    }
+    
+    document.body.appendChild(toast);
+    
+    // Auto-remove from view after 6 seconds
+    setTimeout(() => {
+      toast.style.transition = 'opacity 0.5s ease';
+      toast.style.opacity = '0';
+      setTimeout(() => toast.remove(), 500);
+    }, 6000);
+  }
 });

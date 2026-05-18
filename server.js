@@ -464,7 +464,7 @@ app.post('/api/alerts', async (req, res) => {
               </tr>
               <tr>
                 <td style="padding: 6px 0; font-size: 12px; color: #94a3b8; font-weight: bold; text-transform: uppercase;">Subscription Cost</td>
-                <td style="padding: 6px 0; font-size: 14px; color: #059669; font-weight: bold; text-align: right;">AED 0 (BETA - FREE)</td>
+                <td style="padding: 6px 0; font-size: 14px; color: #1e3a8a; font-weight: bold; text-align: right;">AED 10 / month (Beta Offer)</td>
               </tr>
             </table>
           </div>
@@ -484,7 +484,45 @@ app.post('/api/alerts', async (req, res) => {
       html: welcomeHtml
     });
 
-    res.json({ success: true, message: 'Successfully registered for alerts!' });
+    // Dynamic Stripe Checkout Session Generation
+    let stripeSessionUrl = null;
+    const stripeSecretKey = process.env.STRIPE_SECRET_KEY;
+    if (stripeSecretKey) {
+      try {
+        console.log('Stripe Secret Key detected. Creating Checkout Session...');
+        const params = new URLSearchParams();
+        params.append('success_url', 'https://www.schengen.today/?status=success');
+        params.append('cancel_url', 'https://www.schengen.today/?status=cancel');
+        params.append('mode', 'subscription');
+        params.append('line_items[0][price_data][currency]', 'aed');
+        params.append('line_items[0][price_data][product_data][name]', 'SlotWatch Premium Alerts (Beta)');
+        params.append('line_items[0][price_data][product_data][description]', `Instant Schengen visa slot notifications for ${country}`);
+        params.append('line_items[0][price_data][unit_amount]', '1000'); // AED 10.00
+        params.append('line_items[0][price_data][recurring][interval]', 'month');
+        params.append('line_items[0][quantity]', '1');
+        params.append('customer_email', email);
+
+        const stripeRes = await axios.post('https://api.stripe.com/v1/checkout/sessions', params.toString(), {
+          headers: {
+            'Authorization': `Bearer ${stripeSecretKey}`,
+            'Content-Type': 'application/x-www-form-urlencoded'
+          }
+        });
+
+        if (stripeRes.data && stripeRes.data.url) {
+          stripeSessionUrl = stripeRes.data.url;
+          console.log(`Stripe Checkout Session created successfully: ${stripeSessionUrl}`);
+        }
+      } catch (err) {
+        console.error('Failed to create Stripe checkout session:', err.response ? err.response.data : err.message);
+      }
+    }
+
+    res.json({ 
+      success: true, 
+      message: 'Successfully registered for alerts!', 
+      stripeUrl: stripeSessionUrl 
+    });
   } catch (error) {
     console.error('Error saving alert:', error.message);
     res.status(500).json({ error: 'Failed to register alert.' });
