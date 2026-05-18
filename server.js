@@ -76,13 +76,48 @@ async function sendMail({ to, subject, html }) {
 
 // Official Booking URLs
 function getBookingUrl(country) {
-  if (country === 'France') {
+  const clean = country.trim().toLowerCase();
+  if (clean === 'france') {
     return 'https://fr.tlscontact.com/ae/DXB/';
-  } else if (country === 'Italy') {
-    return 'https://visa.vfsglobal.com/dxb/en/ita/';
-  } else {
-    return 'https://visa.vfsglobal.com/are/en/';
   }
+  if (clean === 'italy') {
+    return 'https://visa.vfsglobal.com/dxb/en/ita/';
+  }
+  
+  // VFS Global ISO-3 country mappings for UAE (are) applicants
+  const mapping = {
+    'germany': 'deu',
+    'spain': 'esp',
+    'greece': 'grc',
+    'netherlands': 'nld',
+    'switzerland': 'che',
+    'austria': 'aut',
+    'portugal': 'prt',
+    'belgium': 'bel',
+    'czech republic': 'cze',
+    'czechia': 'cze',
+    'denmark': 'dnk',
+    'finland': 'fin',
+    'hungary': 'hun',
+    'norway': 'nor',
+    'sweden': 'swe',
+    'malta': 'mlt',
+    'poland': 'pol',
+    'latvia': 'lva',
+    'lithuania': 'ltu',
+    'estonia': 'est',
+    'slovakia': 'svk',
+    'slovenia': 'svn',
+    'iceland': 'isl',
+    'luxembourg': 'lux',
+    'croatia': 'hrv'
+  };
+  
+  const code = mapping[clean];
+  if (code) {
+    return `https://visa.vfsglobal.com/are/en/${code}/`;
+  }
+  return 'https://visa.vfsglobal.com/are/en/';
 }
 
 // Compare current scraped slots with cached slots to detect transitions and trigger alert emails
@@ -104,7 +139,63 @@ async function checkTransitionsAndAlert(newTourist, newBusiness) {
   await checkList(newBusiness, slotsCache.business || []);
 }
 
-// Search waitlist database and email subscribers
+// Send WhatsApp Alert using Meta WhatsApp Cloud API (1,000 free business-initiated conversations/month)
+async function sendWhatsAppAlert(phone, country, date, city, type) {
+  const token = process.env.WHATSAPP_ACCESS_TOKEN;
+  const phoneId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+  const templateName = process.env.WHATSAPP_TEMPLATE_NAME || 'slot_alert';
+  
+  if (!token || !phoneId) {
+    console.log(`[WhatsApp Sim] Meta credentials missing. Message simulated for ${phone}: Schengen visa slots opened for ${country} in ${city} (${type}) on ${date}`);
+    return false;
+  }
+
+  // Ensure phone is numeric-only E.164 (Meta API expects numeric strings)
+  const cleanPhone = phone.replace(/[^0-9]/g, '');
+
+  try {
+    const url = `https://graph.facebook.com/v19.0/${phoneId}/messages`;
+    
+    // Using Meta Cloud API templates (business-initiated requires approved templates)
+    const payload = {
+      messaging_product: 'whatsapp',
+      to: cleanPhone,
+      type: 'template',
+      template: {
+        name: templateName,
+        language: {
+          code: 'en'
+        },
+        components: [
+          {
+            type: 'body',
+            parameters: [
+              { type: 'text', text: country },
+              { type: 'text', text: city },
+              { type: 'text', text: type },
+              { type: 'text', text: date }
+            ]
+          }
+        ]
+      }
+    };
+
+    const response = await axios.post(url, payload, {
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    console.log(`WhatsApp Alert successfully sent to ${phone}:`, response.data);
+    return true;
+  } catch (err) {
+    console.error(`Failed to send WhatsApp Alert to ${phone}:`, err.response ? err.response.data : err.message);
+    return false;
+  }
+}
+
+// Search waitlist database and email/WhatsApp subscribers
 async function triggerAlertsForSlot(item) {
   try {
     const alertsData = JSON.parse(fs.readFileSync(ALERTS_FILE, 'utf8'));
@@ -119,7 +210,7 @@ async function triggerAlertsForSlot(item) {
       return;
     }
     
-    console.log(`Emailing ${matchingAlerts.length} subscribers regarding available ${item.country} slots...`);
+    console.log(`Emailing & WhatsApping ${matchingAlerts.length} subscribers regarding available ${item.country} slots...`);
     const bookingUrl = getBookingUrl(item.country);
     
     for (const alert of matchingAlerts) {
@@ -175,9 +266,12 @@ async function triggerAlertsForSlot(item) {
         subject: `🚨 URGENT: ${item.country} Schengen Slot Available in ${item.city}!`,
         html
       });
+
+      // Broadcast WhatsApp notification simultaneously
+      await sendWhatsAppAlert(alert.phone, item.country, item.date, item.city, item.type);
     }
   } catch (error) {
-    console.error('Failed to trigger alert emails:', error.message);
+    console.error('Failed to trigger alert notifications:', error.message);
   }
 }
 

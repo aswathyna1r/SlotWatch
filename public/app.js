@@ -111,13 +111,48 @@ async function fetchSlots(showLoaders = false) {
 }
 
 function getBookingUrl(country) {
-  if (country === 'France') {
+  const clean = country.trim().toLowerCase();
+  if (clean === 'france') {
     return 'https://fr.tlscontact.com/ae/DXB/';
-  } else if (country === 'Italy') {
-    return 'https://visa.vfsglobal.com/dxb/en/ita/';
-  } else {
-    return 'https://visa.vfsglobal.com/are/en/';
   }
+  if (clean === 'italy') {
+    return 'https://visa.vfsglobal.com/dxb/en/ita/';
+  }
+  
+  // VFS Global ISO-3 country mappings for UAE (are) applicants
+  const mapping = {
+    'germany': 'deu',
+    'spain': 'esp',
+    'greece': 'grc',
+    'netherlands': 'nld',
+    'switzerland': 'che',
+    'austria': 'aut',
+    'portugal': 'prt',
+    'belgium': 'bel',
+    'czech republic': 'cze',
+    'czechia': 'cze',
+    'denmark': 'dnk',
+    'finland': 'fin',
+    'hungary': 'hun',
+    'norway': 'nor',
+    'sweden': 'swe',
+    'malta': 'mlt',
+    'poland': 'pol',
+    'latvia': 'lva',
+    'lithuania': 'ltu',
+    'estonia': 'est',
+    'slovakia': 'svk',
+    'slovenia': 'svn',
+    'iceland': 'isl',
+    'luxembourg': 'lux',
+    'croatia': 'hrv'
+  };
+  
+  const code = mapping[clean];
+  if (code) {
+    return `https://visa.vfsglobal.com/are/en/${code}/`;
+  }
+  return 'https://visa.vfsglobal.com/are/en/';
 }
 
 // Render dynamic tables
