@@ -491,13 +491,22 @@ app.post('/api/alerts', async (req, res) => {
   }
 });
 
-// Fallback to scrape immediately on startup
-scrapeAll();
+const isProductionVercel = !!(process.env.VERCEL);
 
-// Set interval to scrape every 3 minutes (180000ms)
-setInterval(scrapeAll, 180000);
+if (!isProductionVercel) {
+  // Fallback to scrape immediately on startup (local persistent server only)
+  scrapeAll();
 
-app.listen(PORT, async () => {
-  await initMailer();
-  console.log(`SlotWatch server running on http://localhost:${PORT}`);
-});
+  // Set interval to scrape every 3 minutes (local persistent server only)
+  setInterval(scrapeAll, 180000);
+
+  app.listen(PORT, async () => {
+    await initMailer();
+    console.log(`SlotWatch server running on http://localhost:${PORT}`);
+  });
+} else {
+  // On serverless Vercel production, initialize the mailer configurations immediately on function spin-up
+  initMailer();
+}
+
+module.exports = app;
