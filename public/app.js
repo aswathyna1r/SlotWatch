@@ -620,7 +620,7 @@ const FAQS = [
   },
   {
     q: 'How does SlotWatch work?',
-    a: 'Our background engine checks VFS Global and TLScontact portals every 3 minutes. When a slot opens for your chosen country and visa type, we show it instantly on the site and send you a real-time WhatsApp & email with a direct booking link. You then book the slot yourself on the official website.'
+    a: 'Our background engine checks VFS Global and TLScontact portals every 5 minutes. When a slot opens for your chosen country and visa type, we show it instantly on the site and send you a real-time WhatsApp & email with a direct booking link. You then book the slot yourself on the official website.'
   },
   {
     q: 'How quickly do slots get taken after opening?',

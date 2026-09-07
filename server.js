@@ -3,6 +3,7 @@ const axios = require('axios');
 const cheerio = require('cheerio');
 const cors = require('cors');
 const path = require('path');
+const crypto = require('crypto');
 const nodemailer = require('nodemailer');
 const store = require('./store');
 
@@ -201,13 +202,22 @@ async function sendWhatsAppAlert(phone, country, date, city, type) {
   }
 }
 
+// Payment is only enforced when Stripe is configured; otherwise every subscriber is treated as active
+const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
+const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
+const paymentRequired = !!STRIPE_SECRET_KEY;
+
+function isActiveSubscriber(alert) {
+  return !paymentRequired || alert.paid === true;
+}
+
 // Search waitlist database and email/WhatsApp subscribers
 async function triggerAlertsForSlot(item, alertsData) {
   try {
     const matchingAlerts = alertsData.filter(a => {
       const matchCountry = a.country.toLowerCase() === item.country.toLowerCase();
       const matchType = a.visaType === 'Tourist and Business' || a.visaType === item.type;
-      return matchCountry && matchType;
+      return matchCountry && matchType && isActiveSubscriber(a);
     });
     
     if (matchingAlerts.length === 0) {
@@ -284,6 +294,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
+app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), (req, res) => handleStripeWebhook(req, res));
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -481,6 +492,7 @@ app.post('/api/alerts', async (req, res) => {
       visaType: visaType || 'Tourist',
       phone,
       email,
+      paid: false,
       registeredAt: new Date().toISOString()
     };
 
@@ -489,63 +501,22 @@ app.post('/api/alerts', async (req, res) => {
 
     console.log(`Alert enrolled: WhatsApp ${phone} for ${country}`);
 
-    // Send instant Welcome and Waitlist Confirmation HTML email
-    const welcomeHtml = `
-      <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05);">
-        <div style="background: #0f172a; padding: 28px; text-align: center; color: #ffffff;">
-          <h1 style="margin: 0; font-size: 22px; font-weight: bold; letter-spacing: -0.02em;">SlotWatch</h1>
-          <p style="margin: 4px 0 0 0; font-size: 12px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em;">Live waitlist activated</p>
-        </div>
-        <div style="padding: 32px 24px; background: #ffffff;">
-          <h2 style="margin: 0 0 12px 0; color: #0f172a; font-size: 20px; font-weight: 800; letter-spacing: -0.02em;">You're on the list!</h2>
-          <p style="margin: 0 0 24px 0; color: #475569; font-size: 14px; line-height: 1.6;">We have successfully registered your criteria. We are crawling official VFS and TLS portals 24/7. The second a slot opens, we will WhatsApp and email you instantly!</p>
-          
-          <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 18px; margin-bottom: 24px;">
-            <table style="width: 100%; border-collapse: collapse;">
-              <tr>
-                <td style="padding: 6px 0; font-size: 12px; color: #94a3b8; font-weight: bold; text-transform: uppercase;">Country to watch</td>
-                <td style="padding: 6px 0; font-size: 14px; color: #0f172a; font-weight: bold; text-align: right;">${country}</td>
-              </tr>
-              <tr>
-                <td style="padding: 6px 0; font-size: 12px; color: #94a3b8; font-weight: bold; text-transform: uppercase;">Visa Type</td>
-                <td style="padding: 6px 0; font-size: 14px; color: #0f172a; font-weight: bold; text-align: right;">${visaType}</td>
-              </tr>
-              <tr>
-                <td style="padding: 6px 0; font-size: 12px; color: #94a3b8; font-weight: bold; text-transform: uppercase;">Alert Channel</td>
-                <td style="padding: 6px 0; font-size: 14px; color: #0f172a; font-weight: bold; text-align: right;">WhatsApp (${phone}) & Email</td>
-              </tr>
-              <tr>
-                <td style="padding: 6px 0; font-size: 12px; color: #94a3b8; font-weight: bold; text-transform: uppercase;">Subscription Cost</td>
-                <td style="padding: 6px 0; font-size: 14px; color: #1e3a8a; font-weight: bold; text-align: right;">AED 10 / month (Beta Offer)</td>
-              </tr>
-            </table>
-          </div>
-          
-          <h3 style="margin: 0 0 10px 0; color: #0f172a; font-size: 14px; font-weight: bold;">What to do next?</h3>
-          <p style="margin: 0 0 24px 0; color: #475569; font-size: 13px; line-height: 1.6;">Don't wait until you get the slot to prepare! Slots get taken in seconds, so you need to book instantly. Use our interactive <strong>Document Checklist</strong> in the dashboard to organize your salary certificate, bank statements, and itinerary beforehand.</p>
-        </div>
-        <div style="background: #f1f5f9; padding: 16px; text-align: center; font-size: 11px; color: #94a3b8; border-top: 1px solid #e2e8f0;">
-          SlotWatch is an independent real-time monitoring tool. Built in Dubai 🇦🇪
-        </div>
-      </div>
-    `;
-
-    await sendMail({
-      to: email,
-      subject: `✈️ SlotWatch Waitlist Activated — ${country} Schengen Slots`,
-      html: welcomeHtml
-    });
+    if (!paymentRequired) {
+      await sendWelcomeEmail(newAlert);
+    }
 
     // Dynamic Stripe Checkout Session Generation
     let stripeSessionUrl = null;
-    const stripeSecretKey = process.env.STRIPE_SECRET_KEY;
-    if (stripeSecretKey) {
+    if (STRIPE_SECRET_KEY) {
       try {
         console.log('Stripe Secret Key detected. Creating Checkout Session...');
         const params = new URLSearchParams();
         params.append('success_url', 'https://www.schengen.today/?status=success');
         params.append('cancel_url', 'https://www.schengen.today/?status=cancel');
         params.append('mode', 'subscription');
+        params.append('client_reference_id', newAlert.id);
+        params.append('metadata[alert_id]', newAlert.id);
+        params.append('subscription_data[metadata][alert_id]', newAlert.id);
         params.append('line_items[0][price_data][currency]', 'aed');
         params.append('line_items[0][price_data][product_data][name]', 'SlotWatch Premium Alerts (Beta)');
         params.append('line_items[0][price_data][product_data][description]', `Instant Schengen visa slot notifications for ${country}`);
@@ -556,7 +527,7 @@ app.post('/api/alerts', async (req, res) => {
 
         const stripeRes = await axios.post('https://api.stripe.com/v1/checkout/sessions', params.toString(), {
           headers: {
-            'Authorization': `Bearer ${stripeSecretKey}`,
+            'Authorization': `Bearer ${STRIPE_SECRET_KEY}`,
             'Content-Type': 'application/x-www-form-urlencoded'
           }
         });
@@ -581,14 +552,135 @@ app.post('/api/alerts', async (req, res) => {
   }
 });
 
+// Welcome and Waitlist Confirmation HTML email
+async function sendWelcomeEmail({ country, visaType, phone, email }) {
+  const welcomeHtml = `
+    <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05);">
+      <div style="background: #0f172a; padding: 28px; text-align: center; color: #ffffff;">
+        <h1 style="margin: 0; font-size: 22px; font-weight: bold; letter-spacing: -0.02em;">SlotWatch</h1>
+        <p style="margin: 4px 0 0 0; font-size: 12px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em;">Live waitlist activated</p>
+      </div>
+      <div style="padding: 32px 24px; background: #ffffff;">
+        <h2 style="margin: 0 0 12px 0; color: #0f172a; font-size: 20px; font-weight: 800; letter-spacing: -0.02em;">You're on the list!</h2>
+        <p style="margin: 0 0 24px 0; color: #475569; font-size: 14px; line-height: 1.6;">We have successfully registered your criteria. We are crawling official VFS and TLS portals 24/7. The second a slot opens, we will WhatsApp and email you instantly!</p>
+        
+        <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 18px; margin-bottom: 24px;">
+          <table style="width: 100%; border-collapse: collapse;">
+            <tr>
+              <td style="padding: 6px 0; font-size: 12px; color: #94a3b8; font-weight: bold; text-transform: uppercase;">Country to watch</td>
+              <td style="padding: 6px 0; font-size: 14px; color: #0f172a; font-weight: bold; text-align: right;">${country}</td>
+            </tr>
+            <tr>
+              <td style="padding: 6px 0; font-size: 12px; color: #94a3b8; font-weight: bold; text-transform: uppercase;">Visa Type</td>
+              <td style="padding: 6px 0; font-size: 14px; color: #0f172a; font-weight: bold; text-align: right;">${visaType}</td>
+            </tr>
+            <tr>
+              <td style="padding: 6px 0; font-size: 12px; color: #94a3b8; font-weight: bold; text-transform: uppercase;">Alert Channel</td>
+              <td style="padding: 6px 0; font-size: 14px; color: #0f172a; font-weight: bold; text-align: right;">WhatsApp (${phone}) & Email</td>
+            </tr>
+            <tr>
+              <td style="padding: 6px 0; font-size: 12px; color: #94a3b8; font-weight: bold; text-transform: uppercase;">Subscription Cost</td>
+              <td style="padding: 6px 0; font-size: 14px; color: #1e3a8a; font-weight: bold; text-align: right;">AED 10 / month (Beta Offer)</td>
+            </tr>
+          </table>
+        </div>
+        
+        <h3 style="margin: 0 0 10px 0; color: #0f172a; font-size: 14px; font-weight: bold;">What to do next?</h3>
+        <p style="margin: 0 0 24px 0; color: #475569; font-size: 13px; line-height: 1.6;">Don't wait until you get the slot to prepare! Slots get taken in seconds, so you need to book instantly. Use our interactive <strong>Document Checklist</strong> in the dashboard to organize your salary certificate, bank statements, and itinerary beforehand.</p>
+      </div>
+      <div style="background: #f1f5f9; padding: 16px; text-align: center; font-size: 11px; color: #94a3b8; border-top: 1px solid #e2e8f0;">
+        SlotWatch is an independent real-time monitoring tool. Built in Dubai 🇦🇪
+      </div>
+    </div>
+  `;
+
+  await sendMail({
+    to: email,
+    subject: `✈️ SlotWatch Waitlist Activated — ${country} Schengen Slots`,
+    html: welcomeHtml
+  });
+}
+
+// Verify Stripe-Signature header (t=...,v1=...) against the raw request body
+function verifyStripeSignature(rawBody, header, secret, toleranceSec = 300) {
+  if (!header) return false;
+  const parts = Object.fromEntries(header.split(',').map(p => p.split('=')));
+  const timestamp = parts.t;
+  const signature = parts.v1;
+  if (!timestamp || !signature) return false;
+  if (Math.abs(Date.now() / 1000 - Number(timestamp)) > toleranceSec) return false;
+  const expected = crypto.createHmac('sha256', secret).update(`${timestamp}.${rawBody}`).digest('hex');
+  const a = Buffer.from(expected);
+  const b = Buffer.from(signature);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+async function updateAlert(predicate, changes) {
+  const alertsData = await store.loadAlerts();
+  const alert = alertsData.find(predicate);
+  if (!alert) return null;
+  Object.assign(alert, changes);
+  await store.saveAlerts(alertsData);
+  return alert;
+}
+
+// Stripe webhook: activates a subscriber on successful checkout, deactivates on cancellation
+async function handleStripeWebhook(req, res) {
+  if (!STRIPE_WEBHOOK_SECRET) {
+    console.error('STRIPE_WEBHOOK_SECRET not set; rejecting webhook.');
+    return res.status(500).json({ error: 'Webhook not configured.' });
+  }
+  const rawBody = req.body.toString('utf8');
+  if (!verifyStripeSignature(rawBody, req.headers['stripe-signature'], STRIPE_WEBHOOK_SECRET)) {
+    return res.status(400).json({ error: 'Invalid signature.' });
+  }
+
+  let event;
+  try {
+    event = JSON.parse(rawBody);
+  } catch (e) {
+    return res.status(400).json({ error: 'Invalid payload.' });
+  }
+
+  try {
+    const obj = event.data && event.data.object ? event.data.object : {};
+    if (event.type === 'checkout.session.completed') {
+      const alertId = obj.client_reference_id || (obj.metadata && obj.metadata.alert_id);
+      const alert = await updateAlert(a => a.id === alertId, {
+        paid: true,
+        stripeCustomerId: obj.customer || null,
+        stripeSubscriptionId: obj.subscription || null,
+        paidAt: new Date().toISOString()
+      });
+      if (alert) {
+        console.log(`Subscription activated for ${alert.email} (${alert.country})`);
+        await sendWelcomeEmail(alert);
+      } else {
+        console.error(`checkout.session.completed for unknown alert id ${alertId}`);
+      }
+    } else if (event.type === 'customer.subscription.deleted') {
+      const alert = await updateAlert(a => a.stripeSubscriptionId === obj.id, {
+        paid: false,
+        cancelledAt: new Date().toISOString()
+      });
+      if (alert) console.log(`Subscription cancelled for ${alert.email} (${alert.country})`);
+    }
+  } catch (error) {
+    console.error('Error handling Stripe webhook:', error.message);
+    return res.status(500).json({ error: 'Webhook handler failed.' });
+  }
+
+  res.json({ received: true });
+}
+
 const isProductionVercel = !!(process.env.VERCEL);
 
 if (!isProductionVercel) {
   // Fallback to scrape immediately on startup (local persistent server only)
   scrapeAll();
 
-  // Set interval to scrape every 3 minutes (local persistent server only)
-  setInterval(scrapeAll, 180000);
+  // Set interval to scrape every 5 minutes (local persistent server only)
+  setInterval(scrapeAll, 300000);
 
   app.listen(PORT, async () => {
     await initMailer();
