@@ -1,0 +1,17 @@
+name: Scheduled slot scan
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger /api/scan
+        env:
+          SCAN_URL: ${{ vars.SCAN_URL || 'https://www.schengen.today/api/scan' }}
+        run: |
+          curl --fail --silent --show-error --max-time 60 "$SCAN_URL" \
+            | head -c 500

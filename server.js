@@ -2,9 +2,9 @@ const express = require('express');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const cors = require('cors');
-const fs = require('fs');
 const path = require('path');
 const nodemailer = require('nodemailer');
+const store = require('./store');
 
 let mailTransporter = null;
 
@@ -121,7 +121,13 @@ function getBookingUrl(country) {
 }
 
 // Compare current scraped slots with cached slots to detect transitions and trigger alert emails
-async function checkTransitionsAndAlert(newTourist, newBusiness) {
+async function checkTransitionsAndAlert(newTourist, newBusiness, previous) {
+  let alertsData = [];
+  try {
+    alertsData = await store.loadAlerts();
+  } catch (e) {
+    console.error('Failed to load alerts:', e.message);
+  }
   const checkList = async (newList, oldList) => {
     for (const item of newList) {
       const oldItem = oldList.find(r => r.country === item.country && r.city === item.city);
@@ -130,13 +136,13 @@ async function checkTransitionsAndAlert(newTourist, newBusiness) {
       // Transition to available ('av') from non-available ('no' or 'wl')
       if (item.status === 'av' && oldStatus !== 'av') {
         console.log(`🚨 Live slot opening detected! ${item.country} (${item.city} - ${item.type}) has opened slots. Next date: ${item.date}`);
-        await triggerAlertsForSlot(item);
+        await triggerAlertsForSlot(item, alertsData);
       }
     }
   };
   
-  await checkList(newTourist, slotsCache.tourist || []);
-  await checkList(newBusiness, slotsCache.business || []);
+  await checkList(newTourist, previous.tourist || []);
+  await checkList(newBusiness, previous.business || []);
 }
 
 // Send WhatsApp Alert using Meta WhatsApp Cloud API (1,000 free business-initiated conversations/month)
@@ -196,9 +202,8 @@ async function sendWhatsAppAlert(phone, country, date, city, type) {
 }
 
 // Search waitlist database and email/WhatsApp subscribers
-async function triggerAlertsForSlot(item) {
+async function triggerAlertsForSlot(item, alertsData) {
   try {
-    const alertsData = JSON.parse(fs.readFileSync(ALERTS_FILE, 'utf8'));
     const matchingAlerts = alertsData.filter(a => {
       const matchCountry = a.country.toLowerCase() === item.country.toLowerCase();
       const matchType = a.visaType === 'Tourist and Business' || a.visaType === item.type;
@@ -282,61 +287,14 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Ensure data folder exists (handling Vercel read-only filesystem environment)
-const isVercel = !!(process.env.VERCEL || process.env.NOW_BUILDER);
-const DATA_DIR = isVercel ? '/tmp' : path.join(__dirname, 'data');
+// In-memory cache, hydrated from the store on first use
+let slotsCache = null;
 
-const SLOTS_FILE = path.join(DATA_DIR, 'slots.json');
-const ALERTS_FILE = path.join(DATA_DIR, 'alerts.json');
-
-if (isVercel) {
-  // Copy pre-packaged slots/alerts from build folder to writable /tmp on serverless spin-up
-  const defaultSlotsPath = path.join(__dirname, 'data', 'slots.json');
-  const defaultAlertsPath = path.join(__dirname, 'data', 'alerts.json');
-  
-  if (!fs.existsSync(SLOTS_FILE) && fs.existsSync(defaultSlotsPath)) {
-    try {
-      fs.writeFileSync(SLOTS_FILE, fs.readFileSync(defaultSlotsPath, 'utf8'));
-      console.log('Copied pre-packaged slots.json cache to Vercel /tmp directory');
-    } catch (e) {
-      console.error('Failed to copy slots.json to /tmp:', e.message);
-    }
+async function getSlots() {
+  if (!slotsCache) {
+    slotsCache = await store.loadSlots();
   }
-  if (!fs.existsSync(ALERTS_FILE) && fs.existsSync(defaultAlertsPath)) {
-    try {
-      fs.writeFileSync(ALERTS_FILE, fs.readFileSync(defaultAlertsPath, 'utf8'));
-      console.log('Copied default alerts.json to Vercel /tmp directory');
-    } catch (e) {
-      console.error('Failed to copy alerts.json to /tmp:', e.message);
-    }
-  }
-} else {
-  // Local environment setup
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR);
-  }
-  if (!fs.existsSync(SLOTS_FILE)) {
-    fs.writeFileSync(SLOTS_FILE, JSON.stringify({ tourist: [], business: [], lastUpdated: null }, null, 2));
-  }
-  if (!fs.existsSync(ALERTS_FILE)) {
-    fs.writeFileSync(ALERTS_FILE, JSON.stringify([], null, 2));
-  }
-}
-
-// In-memory cache
-let slotsCache = {
-  tourist: [],
-  business: [],
-  lastUpdated: null
-};
-
-// Try loading existing slots from file at startup
-try {
-  const data = fs.readFileSync(SLOTS_FILE, 'utf8');
-  slotsCache = JSON.parse(data);
-  console.log('Loaded slots cache from file.');
-} catch (e) {
-  console.log('Failed to load slots cache from file, using empty default.');
+  return slotsCache;
 }
 
 // Helper to parse flag and country
@@ -464,8 +422,9 @@ async function scrapeAll() {
     const tourist = allResults.filter(r => r.type === 'Tourist');
     const business = allResults.filter(r => r.type === 'Business');
     
-    // Check for transitions before cache update
-    await checkTransitionsAndAlert(tourist, business);
+    // Always compare against the persisted snapshot so transitions survive cold starts
+    const previous = await store.loadSlots();
+    await checkTransitionsAndAlert(tourist, business, previous);
     
     slotsCache = {
       tourist: tourist,
@@ -473,8 +432,7 @@ async function scrapeAll() {
       lastUpdated: new Date().toISOString()
     };
 
-    // Write to persistent file
-    fs.writeFileSync(SLOTS_FILE, JSON.stringify(slotsCache, null, 2));
+    await store.saveSlots(slotsCache);
     console.log(`--- Scrape complete! Total items: ${allResults.length}. Time taken: ${Math.round((Date.now() - startTime) / 1000)}s ---`);
     return true;
   } else {
@@ -484,8 +442,8 @@ async function scrapeAll() {
 }
 
 // REST API: Get slot listings
-app.get('/api/slots', (req, res) => {
-  res.json(slotsCache);
+app.get('/api/slots', async (req, res) => {
+  res.json(await getSlots());
 });
 
 // REST API: Live refresh / scan
@@ -495,7 +453,7 @@ app.get('/api/scan', async (req, res) => {
   // Rate limit live scrape to once every 15 seconds to prevent rate limits on the source
   if (now - lastScanTime < 15000) {
     console.log('Scan requested too quickly. Returning cached data.');
-    return res.json({ success: true, fromCache: true, data: slotsCache });
+    return res.json({ success: true, fromCache: true, data: await getSlots() });
   }
 
   lastScanTime = now;
@@ -503,7 +461,7 @@ app.get('/api/scan', async (req, res) => {
   res.json({
     success: success,
     fromCache: !success,
-    data: slotsCache
+    data: await getSlots()
   });
 });
 
@@ -516,7 +474,7 @@ app.post('/api/alerts', async (req, res) => {
   }
 
   try {
-    const alertsData = JSON.parse(fs.readFileSync(ALERTS_FILE, 'utf8'));
+    const alertsData = await store.loadAlerts();
     const newAlert = {
       id: Date.now().toString(),
       country,
@@ -527,7 +485,7 @@ app.post('/api/alerts', async (req, res) => {
     };
 
     alertsData.push(newAlert);
-    fs.writeFileSync(ALERTS_FILE, JSON.stringify(alertsData, null, 2));
+    await store.saveAlerts(alertsData);
 
     console.log(`Alert enrolled: WhatsApp ${phone} for ${country}`);
 
